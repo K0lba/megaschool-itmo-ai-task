@@ -5,6 +5,57 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import HttpUrl
 from schemas.request import PredictionRequest, PredictionResponse
 from utils.logger import setup_logger
+from together import Together
+import os
+import httpx
+
+
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
+GOOGLE_SEARCH_API_URL = "https://www.googleapis.com/customsearch/v1"
+GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
+
+client = Together(api_key=TOGETHER_API_KEY)
+
+def get_correct_answer(query: str):
+    """Определяет правильный ответ на вопрос с вариантами с помощью DeepSeek AI (через Together API)."""
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1",
+            messages=[
+                {"role": "system", "content": "Ты помощник, который выбирает правильный ответ на вопросы об Университете ИТМО."},
+                {"role": "user", "content": f"Вопрос: {query}\nВыбери правильный ответ из предложенных вариантов и укажи только его номер (цифру от 1 до 10)."}
+            ]
+        )
+
+        # Проверяем, что ответ содержит `choices`
+        if response and response.choices:
+            answer_text = response.choices[0].message.content.strip().split()[-1]
+            return int(answer_text)
+
+    except Exception as e:
+        print(f"Ошибка при запросе к DeepSeek API: {e}")
+        return -1
+    
+def search_relevant_links(query: str):
+    """Ищет релевантные ссылки и reasoning по запросу с помощью Google Search API."""
+    params = {"key": GOOGLE_SEARCH_API_KEY, "cx": GOOGLE_SEARCH_CX, "q": query}
+    try:
+        response = httpx.get(GOOGLE_SEARCH_API_URL, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        sources = []
+        reasoning = "Результаты поиска указывают на следующие источники:"
+        for item in data.get("items", [])[:3]:  # Берем 3 лучших результата
+            title = item.get("title")
+            link = item.get("link")
+            sources.append(HttpUrl(link))
+            reasoning += f"\n- {title}: {link}"
+        return sources, reasoning
+    except Exception as e:
+        print(f"Ошибка при поиске Google Search API: {e}")
+        return [], "Не удалось найти релевантную информацию."
 
 # Initialize
 app = FastAPI()
@@ -53,17 +104,13 @@ async def log_requests(request: Request, call_next):
 async def predict(body: PredictionRequest):
     try:
         await logger.info(f"Processing prediction request with id: {body.id}")
-        # Здесь будет вызов вашей модели
-        answer = 1  # Замените на реальный вызов модели
-        sources: List[HttpUrl] = [
-            HttpUrl("https://itmo.ru/ru/"),
-            HttpUrl("https://abit.itmo.ru/"),
-        ]
+        answer = get_correct_answer(body.query)
+        sources, reasoning = search_relevant_links(body.query)
 
         response = PredictionResponse(
             id=body.id,
             answer=answer,
-            reasoning="Из информации на сайте",
+            reasoning=reasoning,
             sources=sources,
         )
         await logger.info(f"Successfully processed request {body.id}")
